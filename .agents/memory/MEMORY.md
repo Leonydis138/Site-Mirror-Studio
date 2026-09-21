@@ -1,0 +1,1 @@
+- [Mirror archive runtime quirks](mirror-archive-runtime.md) — unzipper archive validation uses `Open.file().files`; generated Zod types should export only the schema module to avoid Orval name collisions.

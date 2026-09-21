@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Site Mirror Studio"
+description = "A controlled website mirroring workspace that creates downloadable offline archives, tracks crawl progress, and lets users preview archived pages and assets before downloading."
+version = "1.0.0"
+id = "artifacts/site-mirror"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19316
+
+[services.development]
+run = "pnpm --filter @workspace/site-mirror run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/site-mirror", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/site-mirror/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19316"
+BASE_PATH = "/"
