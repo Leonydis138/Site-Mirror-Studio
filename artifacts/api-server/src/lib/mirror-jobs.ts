@@ -1374,6 +1374,7 @@ async function downloadAsset(job: MirrorJobRecord, assetUrl: string, origin: URL
     return;
   }
 
+  let attempts = 0;
   const target = new URL(assetUrl);
   if (!(await isHostnameSafe(target.hostname))) {
     recordOutcome(job, {
@@ -1393,7 +1394,7 @@ async function downloadAsset(job: MirrorJobRecord, assetUrl: string, origin: URL
 
   const fetched = await withRetries(() => fetchWithValidatedRedirects(assetUrl, origin, job));
   const { response, finalUrl } = fetched.value;
-  const attempts = fetched.attempts;
+  attempts = fetched.attempts;
   if (!(await isHostnameSafe(finalUrl.hostname)) || !withinScope(finalUrl, origin, job)) {
     recordOutcome(job, {
       kind: "asset",
