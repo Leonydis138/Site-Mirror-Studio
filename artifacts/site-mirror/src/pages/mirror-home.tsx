@@ -5,6 +5,7 @@ import {
   BookOpen,
   Check,
   ChevronDown,
+  MoonStar,
   ChevronRight,
   CircleHelp,
   Clock3,
@@ -106,6 +107,10 @@ export default function MirrorHome() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [excludePathsText, setExcludePathsText] = useState('');
   const [validationError, setValidationError] = useState('');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof document === 'undefined') return 'dark';
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+  });
   const [latestJobId] = useState<string | null>(() => {
     try { return window.localStorage.getItem('site-mirror:last-job'); } catch { return null; }
   });
@@ -120,6 +125,11 @@ export default function MirrorHome() {
   useEffect(() => {
     document.title = 'New mirror · Site Mirror';
   }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
 
   const update = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) => setForm((current) => ({ ...current, [key]: value }));
   const applyPreset = (preset: 'quick' | 'docs' | 'assets' | 'cautious') => {
@@ -178,7 +188,18 @@ export default function MirrorHome() {
         <header className="flex items-center justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/.88)] px-5 py-4 backdrop-blur md:px-10">
           <div className="md:hidden"><SiteMark compact /></div>
           <div className="hidden items-center gap-2 text-xs text-[hsl(var(--muted-foreground))] md:flex"><span className="h-1.5 w-1.5 rounded-full bg-[hsl(157_43%_40%)]" />Control room / New mirror</div>
-          <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]"><span className="hidden sm:inline">Local archive protocol</span><span className="h-1 w-1 rounded-full bg-[hsl(var(--accent))]" />ready</div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]"><span className="hidden sm:inline">Local archive protocol</span><span className="h-1 w-1 rounded-full bg-[hsl(var(--accent))]" />ready</div>
+            <button
+              type="button"
+              onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+              className="inline-flex items-center gap-2 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[.12em] text-[hsl(var(--foreground))] transition-colors hover:border-[hsl(var(--accent-border))]"
+              aria-label="Toggle color theme"
+            >
+              <MoonStar className="h-3.5 w-3.5" />
+              {theme === 'dark' ? 'Light' : 'Dark'}
+            </button>
+          </div>
         </header>
 
         <div className="mx-auto max-w-[1260px] px-5 py-8 md:px-10 md:py-12">
