@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mirror
+      POSTGRES_PASSWORD: mirror
+      POSTGRES_DB: mirror
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mirror"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.base44
+    working_dir: /app
+    volumes:
+      - .:/app
+      - pnpm_store:/root/.local/share/pnpm/store
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://mirror:mirror@db:5432/mirror
+      - BASE44_PUBLIC_HOST_SUFFIX
+      - BASE44_SANDBOX_HOST_DOMAIN
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+    command: ["bash", "scripts/base44-dev.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 300s
+
+volumes:
+  pnpm_store:

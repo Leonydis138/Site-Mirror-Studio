@@ -63,6 +63,7 @@ onlyBuiltDependencies:
   - esbuild
   - msw
   - unrs-resolver
+  - puppeteer
 
 overrides:
   "esbuild>@esbuild/darwin-arm64": "-"
@@ -138,5 +139,5 @@ overrides:
   esbuild: "0.27.3"
 
 allowBuilds:
-  esbuild: set this to true or false
-  puppeteer: set this to true or false
+  esbuild: true
+  puppeteer: true
