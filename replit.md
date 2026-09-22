@@ -63,5 +63,5 @@ Users can configure a permitted archive with advanced controls for depth, path s
 
 - Run API codegen after changing `lib/api-spec/openapi.yaml`. The generated files under `lib/api-zod/src/generated/` and `lib/api-client-react/src/generated/` were hand-edited to match the current spec.
 - Mirror jobs are process-local and temporary; a restart clears active jobs and archives. `MIRROR_JOB_RETENTION_MS` also clears them proactively even without a restart.
-- Offline link rewriting is attribute-level regex (`href`/`src`/`poster`, plus `srcset` for discovery), not a full HTML/CSS parser — links inside inline `<style>` blocks or external CSS files' `url(...)` references are not rewritten.
+- Offline link rewriting covers normal HTML URL attributes, fragments, redirects, responsive/lazy-loaded images, inline styles, CSS `url(...)`/`@import`, and nested stylesheet assets. Browser-generated URLs created later by arbitrary JavaScript cannot be inferred before runtime.
 - `puppeteer` needs Chromium available at runtime; `ensure-browser.mjs` runs during both API builds and development startup, with a runtime fallback for fresh environments.

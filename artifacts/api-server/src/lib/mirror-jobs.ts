@@ -968,8 +968,16 @@ function extractMarkupResources(markup: string): { links: string[]; assets: stri
     }
   }
   for (const match of markup.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) {
-    for (const value of extractCssResourceValues(match[1] ?? "", "https://invalid.local/")) {
-      assets.add(value);
+    const css = match[1] ?? "";
+    const cssUrlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']+))\s*\)/gi;
+    for (const cssMatch of css.matchAll(cssUrlPattern)) {
+      const value = cssMatch[1] ?? cssMatch[2] ?? cssMatch[3];
+      if (value?.trim()) assets.add(value.trim());
+    }
+    const importPattern = /@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+    for (const cssMatch of css.matchAll(importPattern)) {
+      const value = cssMatch[1] ?? cssMatch[2];
+      if (value?.trim()) assets.add(value.trim());
     }
   }
   return { links: [...links], assets: [...assets] };
@@ -1348,6 +1356,7 @@ async function rewriteSavedPageFile(
 ): Promise<void> {
   const outcome = job.outcomes.get(outcomeKey("page", pageUrl));
   if (!isHtmlContentType(outcome?.contentType)) return;
+  const sourceUrl = outcome.finalUrl ?? pageUrl;
 
   const pageFile = path.join(job.outputDir, filePathForUrl(pageUrl));
   let html: string;
@@ -1377,7 +1386,7 @@ async function rewriteSavedPageFile(
   let rewritten = html.replace(REWRITABLE_ATTR, (match, attr: string, dq?: string, sq?: string) => {
     const rawValue = dq ?? sq;
     if (!rawValue) return match;
-    const local = resolveLocal(rawValue, pageUrl);
+     const local = resolveLocal(rawValue, sourceUrl);
     if (!local) return match;
     const quote = dq !== undefined ? '"' : "'";
     return `${attr}=${quote}${local}${quote}`;
@@ -1389,7 +1398,7 @@ async function rewriteSavedPageFile(
     const value = raw.split(",").map((candidate: string) => {
       const parts = candidate.trim().split(/\s+/);
       if (!parts[0]) return candidate;
-      const local = resolveLocal(parts[0], pageUrl);
+       const local = resolveLocal(parts[0], sourceUrl);
       if (local) parts[0] = local;
       return parts.join(" ");
     }).join(", ");
@@ -1401,7 +1410,7 @@ async function rewriteSavedPageFile(
     const value = raw.split(",").map((candidate: string) => {
       const parts = candidate.trim().split(/\s+/);
       if (!parts[0]) return candidate;
-      const local = resolveLocal(parts[0], pageUrl);
+       const local = resolveLocal(parts[0], sourceUrl);
       if (local) parts[0] = local;
       return parts.join(" ");
     }).join(", ");
@@ -1409,18 +1418,18 @@ async function rewriteSavedPageFile(
     return `data-srcset=${quote}${value}${quote}`;
   });
 
-  const rewriteCss = (css: string, sourceUrl: string, sourceFile: string): string =>
+  const rewriteCss = (css: string, sourceUrl: string): string =>
     css.replace(/url\(\s*(["']?)([^)"']+)\1\s*\)/gi, (match, quote: string, raw: string) => {
       const local = resolveLocal(raw.trim(), sourceUrl);
       return local ? `url(${quote}${local}${quote})` : match;
     });
   rewritten = rewritten.replace(
     /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
-    (match, open: string, css: string, close: string) => `${open}${rewriteCss(css, pageUrl, pageFile)}${close}`,
+    (match, open: string, css: string, close: string) => `${open}${rewriteCss(css, sourceUrl)}${close}`,
   );
   rewritten = rewritten.replace(
     /(\bstyle\s*=\s*)(["'])([\s\S]*?)\2/gi,
-    (match, prefix: string, quote: string, css: string) => `${prefix}${quote}${rewriteCss(css, pageUrl, pageFile)}${quote}`,
+    (match, prefix: string, quote: string, css: string) => `${prefix}${quote}${rewriteCss(css, sourceUrl)}${quote}`,
   );
 
   if (rewritten !== html) await fs.writeFile(pageFile, rewritten);
@@ -1431,10 +1440,6 @@ async function rewriteSavedCssFile(
   assetUrl: string,
 ): Promise<void> {
   const outcome = job.outcomes.get(outcomeKey("asset", assetUrl));
-  logger.info(
-    { jobId: job.id, assetUrl, contentType: outcome?.contentType, archivePath: outcome?.archivePath },
-    "Inspecting saved stylesheet for local asset rewrites",
-  );
   if (!outcome || !/text\/css/i.test(outcome.contentType ?? "") || !outcome.archivePath) return;
   const cssFile = path.join(job.outputDir, outcome.archivePath);
   let css: string;
@@ -1450,10 +1455,6 @@ async function rewriteSavedCssFile(
       const fragment = target.hash;
       target.hash = "";
       const targetOutcome = findSavedOutcome(job, target.href);
-      logger.info(
-        { jobId: job.id, assetUrl, targetUrl: target.href, targetArchivePath: targetOutcome?.archivePath },
-        "Resolved stylesheet asset reference",
-      );
       if (!targetOutcome?.archivePath) return match;
       const local = path.relative(path.dirname(cssFile), path.join(job.outputDir, targetOutcome.archivePath)).replace(/\\/g, "/");
       return `url(${quote}${local}${fragment}${quote})`;
