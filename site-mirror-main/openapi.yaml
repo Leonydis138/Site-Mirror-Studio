@@ -1,0 +1,13 @@
+# This file is deprecated. The canonical OpenAPI specification for this repository lives at `lib/api-spec/openapi.yaml`.
+# Keep that file up to date and run the workspace codegen from there.
+openapi: 3.0.0
+info:
+  title: Site Mirror API (DEPRECATED)
+  version: 1.0.0
+  description: >-
+    This OpenAPI file at the repository root is deprecated. The canonical
+    specification used for code generation and clients is `lib/api-spec/openapi.yaml`.
+    Please update that file for API changes and run `pnpm --filter @workspace/api-spec run codegen`.
+servers:
+  - url: http://localhost:3000
+paths: {}

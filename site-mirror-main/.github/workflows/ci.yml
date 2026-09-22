@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # Do NOT set cache: 'pnpm' here because pnpm may not be installed yet.
+
+      - name: Install pnpm (corepack + npm fallback) and print versions
+        run: |
+          # Try corepack for modern Node images
+          if command -v corepack >/dev/null 2>&1; then
+            corepack enable
+            corepack prepare pnpm@latest --activate || true
+          fi
+          # Ensure pnpm available (npm global fallback)
+          if ! command -v pnpm >/dev/null 2>&1; then
+            npm install -g pnpm@latest
+          fi
+          pnpm -v
+          node -v
+          npm -v
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck workspace
+        run: pnpm run typecheck
+
+      - name: Build api-server
+        run: pnpm --filter @workspace/api-server run build
