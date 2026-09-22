@@ -919,11 +919,26 @@ function normalizeResourceValues(values: string[], baseUrl: string): string[] {
     .filter((value): value is string => Boolean(value));
 }
 
+function extractCssResourceValues(css: string, baseUrl: string): string[] {
+  const values = new Set<string>();
+  const urlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']+))\s*\)/gi;
+  for (const match of css.matchAll(urlPattern)) {
+    const value = match[1] ?? match[2] ?? match[3];
+    if (value?.trim()) values.add(value.trim());
+  }
+  const importPattern = /@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+  for (const match of css.matchAll(importPattern)) {
+    const value = match[1] ?? match[2];
+    if (value?.trim()) values.add(value.trim());
+  }
+  return normalizeResourceValues([...values], baseUrl);
+}
+
 function extractMarkupResources(markup: string): { links: string[]; assets: string[] } {
   const links = new Set<string>();
   const assets = new Set<string>();
   const attributePattern =
-    /\b(href|src|poster|data-src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+    /\b(href|src|poster|action|data|data-src|data-lazy-src|data-original|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
   for (const match of markup.matchAll(attributePattern)) {
     const attribute = match[1]?.toLowerCase();
     const value = match[2] ?? match[3];
@@ -944,6 +959,17 @@ function extractMarkupResources(markup: string): { links: string[]; assets: stri
     for (const candidate of (match[1] ?? match[2] ?? "").split(",")) {
       const url = candidate.trim().split(/\s+/)[0];
       if (url) assets.add(url);
+    }
+  }
+  for (const match of markup.matchAll(/\bdata-srcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    for (const candidate of (match[1] ?? match[2] ?? "").split(",")) {
+      const url = candidate.trim().split(/\s+/)[0];
+      if (url) assets.add(url);
+    }
+  }
+  for (const match of markup.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)) {
+    for (const value of extractCssResourceValues(match[1] ?? "", "https://invalid.local/")) {
+      assets.add(value);
     }
   }
   return { links: [...links], assets: [...assets] };
@@ -1115,7 +1141,18 @@ function filePathForUrl(rawUrl: string, contentType?: string | null, kind: "page
 }
 
 function sameOrigin(candidate: URL, origin: URL): boolean {
-  return candidate.origin === origin.origin;
+  if (candidate.hostname.toLowerCase() !== origin.hostname.toLowerCase()) return false;
+  if (!["http:", "https:"].includes(candidate.protocol) || !["http:", "https:"].includes(origin.protocol)) return false;
+
+  const defaultPort = (url: URL) => url.port || (url.protocol === "https:" ? "443" : "80");
+  const candidatePort = defaultPort(candidate);
+  const originPort = defaultPort(origin);
+  // Treat the normal HTTP/HTTPS pair as one website scope. This preserves
+  // common http-to-https internal links without allowing arbitrary ports on
+  // the same hostname.
+  return candidatePort === originPort ||
+    ["80", "443"].includes(candidatePort) &&
+    ["80", "443"].includes(originPort);
 }
 
 function normalizePathPrefix(value: string): string {
@@ -1259,17 +1296,55 @@ async function writeFileForUrl(
 // inside the downloaded archive. This is what makes the mirror actually
 // browsable offline, not just a pile of individually-correct files.
 //
-// This is attribute-level rewriting via regex, not a full HTML parser —
-// it does not rewrite `srcset` lists or URLs inside inline <style> blocks
-// or CSS files. Good enough for the common case; a real HTML/CSS parser
-// would be the next step if that's ever needed.
+// This is deliberately a conservative HTML rewrite rather than a browser-side
+// transformation. It covers the URL-bearing attributes used by normal pages,
+// responsive images, inline CSS, and external stylesheets while leaving
+// external or uncaptured URLs untouched.
 
-const REWRITABLE_ATTR = /\b(href|src|poster)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const REWRITABLE_ATTR =
+  /\b(href|src|poster|action|data|data-src|data-lazy-src|data-original|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+function redirectedMirrorUrl(job: MirrorJobRecord, rawUrl: string): string {
+  let current = rawUrl;
+  const visited = new Set<string>();
+  for (let index = 0; index < 12; index += 1) {
+    const next = job.redirects.get(current);
+    if (!next || visited.has(next)) break;
+    visited.add(current);
+    current = next;
+  }
+  return current;
+}
+
+function findSavedOutcome(job: MirrorJobRecord, rawUrl: string): MirrorOutcome | undefined {
+  let target: URL;
+  try {
+    target = new URL(rawUrl);
+    target.hash = "";
+  } catch {
+    return undefined;
+  }
+  const canonical = redirectedMirrorUrl(job, target.href);
+  const direct =
+    job.outcomes.get(outcomeKey("page", target.href)) ??
+    job.outcomes.get(outcomeKey("asset", target.href)) ??
+    job.outcomes.get(outcomeKey("page", canonical)) ??
+    job.outcomes.get(outcomeKey("asset", canonical));
+  if (direct?.status === "saved" && direct.archivePath) return direct;
+  return [...job.outcomes.values()].find(
+    (outcome) =>
+      outcome.status === "saved" &&
+      Boolean(outcome.archivePath) &&
+      (outcome.url === target.href ||
+        outcome.url === canonical ||
+        outcome.finalUrl === target.href ||
+        outcome.finalUrl === canonical),
+  );
+}
 
 async function rewriteSavedPageFile(
   job: MirrorJobRecord,
   pageUrl: string,
-  knownUrls: Set<string>,
 ): Promise<void> {
   const outcome = job.outcomes.get(outcomeKey("page", pageUrl));
   if (!isHtmlContentType(outcome?.contentType)) return;
@@ -1290,19 +1365,13 @@ async function rewriteSavedPageFile(
     } catch {
       return null;
     }
+    const fragment = target.hash;
     target.hash = "";
-    const redirected = job.redirects.get(target.href);
-    const canonical = redirected ?? target.href;
-    if (!knownUrls.has(target.href) && !knownUrls.has(canonical)) return null;
-    const targetOutcome =
-      job.outcomes.get(outcomeKey("page", canonical)) ??
-      job.outcomes.get(outcomeKey("page", target.href)) ??
-      job.outcomes.get(outcomeKey("asset", canonical)) ??
-      job.outcomes.get(outcomeKey("asset", target.href));
+    const targetOutcome = findSavedOutcome(job, target.href);
     if (!targetOutcome?.archivePath) return null;
     const targetFile = path.join(job.outputDir, targetOutcome.archivePath);
     const relative = path.relative(path.dirname(pageFile), targetFile).replace(/\\/g, "/");
-    return relative || path.basename(targetFile);
+    return `${relative || path.basename(targetFile)}${fragment}`;
   };
 
   let rewritten = html.replace(REWRITABLE_ATTR, (match, attr: string, dq?: string, sq?: string) => {
@@ -1327,6 +1396,32 @@ async function rewriteSavedPageFile(
     const quote = dq !== undefined ? '"' : "'";
     return `srcset=${quote}${value}${quote}`;
   });
+  rewritten = rewritten.replace(/\bdata-srcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (match, dq?: string, sq?: string) => {
+    const raw = dq ?? sq ?? "";
+    const value = raw.split(",").map((candidate: string) => {
+      const parts = candidate.trim().split(/\s+/);
+      if (!parts[0]) return candidate;
+      const local = resolveLocal(parts[0], pageUrl);
+      if (local) parts[0] = local;
+      return parts.join(" ");
+    }).join(", ");
+    const quote = dq !== undefined ? '"' : "'";
+    return `data-srcset=${quote}${value}${quote}`;
+  });
+
+  const rewriteCss = (css: string, sourceUrl: string, sourceFile: string): string =>
+    css.replace(/url\(\s*(["']?)([^)"']+)\1\s*\)/gi, (match, quote: string, raw: string) => {
+      const local = resolveLocal(raw.trim(), sourceUrl);
+      return local ? `url(${quote}${local}${quote})` : match;
+    });
+  rewritten = rewritten.replace(
+    /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi,
+    (match, open: string, css: string, close: string) => `${open}${rewriteCss(css, pageUrl, pageFile)}${close}`,
+  );
+  rewritten = rewritten.replace(
+    /(\bstyle\s*=\s*)(["'])([\s\S]*?)\2/gi,
+    (match, prefix: string, quote: string, css: string) => `${prefix}${quote}${rewriteCss(css, pageUrl, pageFile)}${quote}`,
+  );
 
   if (rewritten !== html) await fs.writeFile(pageFile, rewritten);
 }
@@ -1334,29 +1429,51 @@ async function rewriteSavedPageFile(
 async function rewriteSavedCssFile(
   job: MirrorJobRecord,
   assetUrl: string,
-  knownUrls: Set<string>,
 ): Promise<void> {
   const outcome = job.outcomes.get(outcomeKey("asset", assetUrl));
+  logger.info(
+    { jobId: job.id, assetUrl, contentType: outcome?.contentType, archivePath: outcome?.archivePath },
+    "Inspecting saved stylesheet for local asset rewrites",
+  );
   if (!outcome || !/text\/css/i.test(outcome.contentType ?? "") || !outcome.archivePath) return;
   const cssFile = path.join(job.outputDir, outcome.archivePath);
   let css: string;
   try { css = await fs.readFile(cssFile, "utf8"); } catch { return; }
-  const rewritten = css.replace(/url\(\s*(["']?)([^)"']+)\1\s*\)/gi, (match, quote: string, raw: string) => {
-    const trimmed = raw.trim();
-    if (/^(?:data:|blob:|#|https?:\/\/)/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) return match;
-    const local = (() => {
+  const rewriteCss = (value: string): string =>
+    value.replace(/url\(\s*(["']?)([^)"']+)\1\s*\)/gi, (match, quote: string, raw: string) => {
+      let target: URL;
       try {
-        const target = new URL(trimmed, assetUrl);
-        target.hash = "";
-        const canonical = job.redirects.get(target.href) ?? target.href;
-        if (!knownUrls.has(target.href) && !knownUrls.has(canonical)) return null;
-        const targetOutcome = job.outcomes.get(outcomeKey("asset", canonical)) ?? job.outcomes.get(outcomeKey("asset", target.href));
-        if (!targetOutcome?.archivePath) return null;
-        return path.relative(path.dirname(cssFile), path.join(job.outputDir, targetOutcome.archivePath)).replace(/\\/g, "/");
-      } catch { return null; }
-    })();
-    return local ? `url(${quote}${local}${quote})` : match;
-  });
+        target = new URL(raw.trim(), assetUrl);
+      } catch {
+        return match;
+      }
+      const fragment = target.hash;
+      target.hash = "";
+      const targetOutcome = findSavedOutcome(job, target.href);
+      logger.info(
+        { jobId: job.id, assetUrl, targetUrl: target.href, targetArchivePath: targetOutcome?.archivePath },
+        "Resolved stylesheet asset reference",
+      );
+      if (!targetOutcome?.archivePath) return match;
+      const local = path.relative(path.dirname(cssFile), path.join(job.outputDir, targetOutcome.archivePath)).replace(/\\/g, "/");
+      return `url(${quote}${local}${fragment}${quote})`;
+    });
+  let rewritten = rewriteCss(css);
+  rewritten = rewritten.replace(
+    /(@import\s*)(["'])([^"']+)\2/gi,
+    (match, prefix: string, quote: string, raw: string) => {
+      let target: URL;
+      try {
+        target = new URL(raw.trim(), assetUrl);
+      } catch {
+        return match;
+      }
+      const targetOutcome = findSavedOutcome(job, target.href);
+      if (!targetOutcome?.archivePath) return match;
+      const local = path.relative(path.dirname(cssFile), path.join(job.outputDir, targetOutcome.archivePath)).replace(/\\/g, "/");
+      return `${prefix}${quote}${local}${quote}`;
+    },
+  );
   if (rewritten !== css) await fs.writeFile(cssFile, rewritten);
 }
 
@@ -1722,36 +1839,55 @@ async function runJob(job: MirrorJobRecord): Promise<void> {
                   forEach: (
                     callback: (element: {
                       getAttribute: (name: string) => string | null;
+                      textContent?: string | null;
                     }) => void,
                   ) => void;
                 };
               };
             }
           ).document;
-          const linkElements = pageDocument.querySelectorAll("a[href]");
+          const linkElements = pageDocument.querySelectorAll("a[href], area[href], base[href], form[action]");
           linkElements.forEach((element) => {
-            const value = element.getAttribute("href");
+            const value = element.getAttribute("href") ?? element.getAttribute("action");
             if (value) links.add(value);
           });
           const assetElements = pageDocument.querySelectorAll(
-            "link[href], img[src], script[src], source[src], video[src], audio[src], iframe[src]",
+            "link[href], img[src], img[data-src], script[src], source[src], source[data-src], video[src], video[poster], audio[src], iframe[src], object[data], embed[src], input[src], track[src], image[href], image[xlink\\:href], [data-lazy-src], [data-original]",
           );
           assetElements.forEach((element) => {
-            const value =
-              element.getAttribute("href") ??
-              element.getAttribute("src") ??
-              element.getAttribute("data-src");
-            if (value) assets.add(value);
+            for (const attribute of [
+              "href",
+              "xlink:href",
+              "src",
+              "poster",
+              "data",
+              "data-src",
+              "data-lazy-src",
+              "data-original",
+            ]) {
+              const value = element.getAttribute(attribute);
+              if (value) assets.add(value);
+            }
           });
-          const srcsetElements = pageDocument.querySelectorAll("img[srcset], source[srcset]");
+          const srcsetElements = pageDocument.querySelectorAll("img[srcset], source[srcset], img[data-srcset], source[data-srcset]");
           srcsetElements.forEach((element) => {
-            const value = element.getAttribute("srcset");
+            const value = element.getAttribute("srcset") ?? element.getAttribute("data-srcset");
             if (!value) return;
             for (const candidate of value.split(",")) {
               const url = candidate.trim().split(/\s+/)[0];
               if (url) assets.add(url);
             }
           });
+          const cssUrlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"']+))\s*\)/gi;
+          const collectCssUrls = (css: string | null | undefined) => {
+            if (!css) return;
+            for (const match of css.matchAll(cssUrlPattern)) {
+              const value = match[1] ?? match[2] ?? match[3];
+              if (value?.trim()) assets.add(value.trim());
+            }
+          };
+          pageDocument.querySelectorAll("style").forEach((element) => collectCssUrls(element.textContent));
+          pageDocument.querySelectorAll("[style]").forEach((element) => collectCssUrls(element.getAttribute("style")));
           return { links: [...links], assets: [...assets] };
             })
           : { links: [], assets: [] };
@@ -1830,26 +1966,59 @@ async function runJob(job: MirrorJobRecord): Promise<void> {
             })
           : [];
         job.progressPhase = "downloading_assets";
-        await runWithConcurrency(assetUrls, ASSET_DOWNLOAD_CONCURRENCY, async (assetUrl) => {
-          if (job.cancelRequested || job.bytesDownloaded >= job.maxTotalBytes) return;
-          try {
-            await downloadAsset(job, assetUrl, origin);
-          } catch (error) {
-            recordOutcome(job, {
-              kind: "asset",
-              url: assetUrl,
-              status: "failed",
-              httpStatus: null,
-              contentType: null,
-              finalUrl: null,
-              archivePath: null,
-              reason: error instanceof Error ? error.message : "asset request failed",
-              attempts: 1,
-              bytes: 0,
-            });
-            logger.debug({ err: error, assetUrl, jobId: job.id }, "Asset download failed; continuing");
+        const pendingAssets = [...new Set(assetUrls)];
+        const queuedAssets = new Set(pendingAssets);
+        while (pendingAssets.length > 0 && !job.cancelRequested && job.bytesDownloaded < job.maxTotalBytes) {
+          const batch = pendingAssets.splice(0, pendingAssets.length);
+          await runWithConcurrency(batch, ASSET_DOWNLOAD_CONCURRENCY, async (assetUrl) => {
+            if (job.cancelRequested || job.bytesDownloaded >= job.maxTotalBytes) return;
+            try {
+              await downloadAsset(job, assetUrl, origin);
+            } catch (error) {
+              recordOutcome(job, {
+                kind: "asset",
+                url: assetUrl,
+                status: "failed",
+                httpStatus: null,
+                contentType: null,
+                finalUrl: null,
+                archivePath: null,
+                reason: error instanceof Error ? error.message : "asset request failed",
+                attempts: 1,
+                bytes: 0,
+              });
+              logger.debug({ err: error, assetUrl, jobId: job.id }, "Asset download failed; continuing");
+            }
+          });
+
+          for (const assetUrl of batch) {
+            const assetOutcome = job.outcomes.get(outcomeKey("asset", assetUrl));
+            if (
+              assetOutcome?.status !== "saved" ||
+              !assetOutcome.archivePath ||
+              !/css/i.test(assetOutcome.contentType ?? "") && !/\.css$/i.test(assetUrl)
+            ) {
+              continue;
+            }
+            try {
+              const css = await fs.readFile(path.join(job.outputDir, assetOutcome.archivePath), "utf8");
+              const nestedAssets = extractCssResourceValues(css, assetOutcome.finalUrl ?? assetUrl);
+              for (const nestedAsset of nestedAssets) {
+                const parsed = new URL(nestedAsset);
+                if (
+                  withinScope(parsed, origin, job) &&
+                  shouldSaveResource(parsed) &&
+                  !queuedAssets.has(nestedAsset)
+                ) {
+                  queuedAssets.add(nestedAsset);
+                  pendingAssets.push(nestedAsset);
+                }
+              }
+            } catch (error) {
+              logger.debug({ err: error, assetUrl, jobId: job.id }, "Failed to discover nested CSS assets");
+            }
           }
-        });
+        }
 
         let bodyContentType: string | null = savedContentType;
         let bodyFinalUrl = finalUrl;
@@ -1946,16 +2115,15 @@ async function runJob(job: MirrorJobRecord): Promise<void> {
 
     if (job.status !== "cancelled") {
       job.progressPhase = "rewriting";
-      const knownUrls = new Set<string>([...job.savedPages, ...job.downloadedAssets]);
       for (const pageUrl of job.savedPages) {
         if (job.cancelRequested) break;
-        await rewriteSavedPageFile(job, pageUrl, knownUrls).catch((error) => {
+        await rewriteSavedPageFile(job, pageUrl).catch((error) => {
           logger.debug({ err: error, pageUrl, jobId: job.id }, "Failed to rewrite links for a saved page");
         });
       }
       for (const assetUrl of job.downloadedAssets) {
         if (job.cancelRequested) break;
-        await rewriteSavedCssFile(job, assetUrl, knownUrls).catch((error) => {
+        await rewriteSavedCssFile(job, assetUrl).catch((error) => {
           logger.debug({ err: error, assetUrl, jobId: job.id }, "Failed to rewrite CSS asset links");
         });
       }
